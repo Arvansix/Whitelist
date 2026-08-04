@@ -673,60 +673,113 @@ local function JalankanAutoCollectGlobal()
                     end
                     if delta.Y < -12 and stageBelumHancur then continue end
                     
-                    local distToChar = delta.Magnitude
+-- ==============================================================
+-- FUNGSI COLLECT (Deteksi Instan + Eksekusi Stabil)
+-- ==============================================================
+local cachedPrompts = {}  
+
+-- 1. DETEKSI INSTAN: Tangkap prompt detik itu juga tanpa mengecek namanya dulu
+local function AddToCache(obj)
+    if obj:IsA("ProximityPrompt") then
+        cachedPrompts[obj] = true
+    end
+end
+
+-- Scan awal (hanya jalan 1x)
+task.spawn(function()
+    local t = os.clock()
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        t = YieldCheck(t) 
+        AddToCache(obj)
+    end
+end)
+
+-- Listener Event-Driven (0% Lag, langsung masuk cache saat item jatuh)
+Workspace.DescendantAdded:Connect(AddToCache)
+Workspace.DescendantRemoving:Connect(function(obj)
+    if cachedPrompts[obj] then cachedPrompts[obj] = nil end
+end)
+
+local function JalankanAutoCollectGlobal()
+    if IsCollectingProcessRunning then return end
+    if not AutoCollectActive or IsGiftingTick or IsReturningTick then return end
+    
+    local modeValid = false
+    if AutoCollectMode == "Nama Item" and #SelectedCollectItems > 0 then modeValid = true end
+    if AutoCollectMode == "Berdasarkan Rarity" and #SelectedCollectRarities > 0 then modeValid = true end
+    if not modeValid then return end
+    
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    local promptYangDiambil, partYangDituju = nil, nil
+    local jarakTerdekat = math.huge 
+    local charPos = hrp.Position
+    
+    -- 2. SCAN REAL-TIME: Baca nama item dari cache prompt secara langsung
+    for obj, _ in pairs(cachedPrompts) do
+        if obj and obj.Parent and obj.Parent:IsA("BasePart") and not BlacklistedItems[obj] then
+            local parentPart = obj.Parent
+            local namaItem = DapatkanNamaItem(obj) -- Cek nama asli di sini
+            
+            if namaItem then
+                local rarityStr = ItemsList[namaItem] and tostring(ItemsList[namaItem].Rarity or "Unknown")
+                
+                if IsItemMatchForCollect(namaItem, rarityStr) then
+                    local delta = parentPart.Position - charPos
                     
-                    -- LOGIKA STAGGERED VACUUM
-                    if distToChar < 12 then
-                        adaItemYangDisedot = true
-                        BlacklistedItems[prompt] = true
-                        
-                        task.delay(microDelay, function()
-                            if prompt and prompt.Parent then
-                                pcall(function() fireproximityprompt(prompt) end)
+                    -- FILTER CERDAS STAGE TERAKHIR
+                    local stageData = StagesList and StagesList[CurrentStage]
+                    local stageBelumHancur = false
+                    if stageData and stageData.Stages then
+                        for _, wallData in pairs(stageData.Stages) do
+                            if wallData and wallData.Wall and wallData.Wall.Parent and wallData.Wall.Transparency < 1 then
+                                stageBelumHancur = true
+                                break
                             end
-                            task.delay(0.3, function() if prompt then BlacklistedItems[prompt] = nil end end)
-                        end)
-                        
-                        microDelay = microDelay + 0.15 -- Jeda jaringan anti-kick
-                    else
-                        if distToChar < jarakTeleportTerdekat then
-                            jarakTeleportTerdekat = distToChar
-                            targetTeleport = {prompt = prompt, part = parentPart}
                         end
+                    end
+
+                    if delta.Y < -12 and stageBelumHancur then
+                        continue
+                    end
+                    
+                    local distToChar = delta.Magnitude
+                    if distToChar < jarakTerdekat then
+                        jarakTerdekat = distToChar
+                        promptYangDiambil = obj
+                        partYangDituju = parentPart
                     end
                 end
             end
         end
     end
 
-    -- TELEPORT JIKA TIDAK ADA YANG DEKAT
-    if not adaItemYangDisedot and targetTeleport then
-        local targetPrompt = targetTeleport.prompt
+    -- 3. EKSEKUSI STABIL: Menggunakan jeda aman anti-ghost sync milikmu
+    if promptYangDiambil and partYangDituju then
+        IsCollectingProcessRunning = true
+        BlacklistedItems[promptYangDiambil] = true
         
-        BlacklistedItems[targetPrompt] = true
-        local savedCFrame = hrp.CFrame
-        local wasAnchored = hrp.Anchored
+        hrp.Anchored = false
+        hrp.CFrame = partYangDituju.CFrame * CFrame.new(0, 1.5, 0)
         
-        hrp.Anchored = true 
-        hrp.CFrame = targetTeleport.part.CFrame * CFrame.new(0, 1.5, 0)
-        task.wait(0.25) 
+        task.wait(0.15) -- Jeda server merender posisi
+        pcall(function() fireproximityprompt(promptYangDiambil) end)
+        task.wait(0.25) -- Jeda server memproses item masuk tas
         
-        pcall(function() fireproximityprompt(targetPrompt) end)
-        task.wait(0.25) 
+        task.delay(0.2, function()
+            if promptYangDiambil then BlacklistedItems[promptYangDiambil] = nil end
+        end)
         
-        hrp.CFrame = savedCFrame
-        hrp.Anchored = wasAnchored
-        
-        task.delay(0.5, function() if targetPrompt then BlacklistedItems[targetPrompt] = nil end end)
+        IsCollectingProcessRunning = false
     end
-    
-    IsCollectingProcessRunning = false
 end
 
--- [GANTI JUGA LOOP PEMANGGIL INI DI BAWAH FUNGSINYA]
+-- Loop pemanggil dipercepat jadi 0.05 detik (karena baca cache instan & ringan)
 task.spawn(function()
     while true do
-        task.wait(0.25) -- Dipercepat drastis! (dari 0.25 jadi 0.05 detik)
+        task.wait(0.05)
         if AutoCollectActive and not IsGiftingTick and not IsReturningTick then
             JalankanAutoCollectGlobal()
         end
