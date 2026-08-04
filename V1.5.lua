@@ -687,7 +687,7 @@ local function JalankanAutoCollectGlobal()
                             task.delay(0.3, function() if prompt then BlacklistedItems[prompt] = nil end end)
                         end)
                         
-                        microDelay = microDelay + 0.08 -- Jeda jaringan anti-kick
+                        microDelay = microDelay + 0.15 -- Jeda jaringan anti-kick
                     else
                         if distToChar < jarakTeleportTerdekat then
                             jarakTeleportTerdekat = distToChar
@@ -709,10 +709,10 @@ local function JalankanAutoCollectGlobal()
         
         hrp.Anchored = true 
         hrp.CFrame = targetTeleport.part.CFrame * CFrame.new(0, 1.5, 0)
-        task.wait(0.15) 
+        task.wait(0.25) 
         
         pcall(function() fireproximityprompt(targetPrompt) end)
-        task.wait(0.15) 
+        task.wait(0.25) 
         
         hrp.CFrame = savedCFrame
         hrp.Anchored = wasAnchored
@@ -726,7 +726,7 @@ end
 -- [GANTI JUGA LOOP PEMANGGIL INI DI BAWAH FUNGSINYA]
 task.spawn(function()
     while true do
-        task.wait(0.15) -- Dipercepat drastis! (dari 0.25 jadi 0.05 detik)
+        task.wait(0.25) -- Dipercepat drastis! (dari 0.25 jadi 0.05 detik)
         if AutoCollectActive and not IsGiftingTick and not IsReturningTick then
             JalankanAutoCollectGlobal()
         end
