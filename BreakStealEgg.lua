@@ -31,21 +31,16 @@ local function safeRequire(parent, childName)
 end
 
 local SharedFolder = ReplicatedStorage:FindFirstChild("Shared")
-local SatchelConfig = safeRequire(SharedFolder, "SatchelConfig")
 local AnimalRagdoll = safeRequire(SharedFolder, "AnimalRagdoll")
 local RagdollPhysics = safeRequire(SharedFolder, "RagdollPhysics")
 
-local CONFIG_FILE = "BreakStealEgg_Config.json"
-local unpackFn = table.unpack or unpack
-
 local State = {
-    -- Auto Carry Zone 1 & Auto Swap SafeZone
+    -- Auto Carry Zone 1 & Smart Swap SafeZone (Max 1 Pet)
     AutoGrab = false,
     TargetValueRaw = "10B",
     MinTargetNumber = 1e10,
     AntiRagdoll = true,
     OffsetY = 2.0,
-    Zone1StandCFrame = RootPart.CFrame,
 
     -- Webhook Discord (Aktif di latar belakang, tersembunyi dari menu)
     WebhookEnabled = true,
@@ -56,7 +51,6 @@ local State = {
 
 local isBusy = false
 local sentCache = {}
-local isLoaded = false
 
 LocalPlayer.CharacterAdded:Connect(function(newChar)
     Character = newChar
@@ -79,6 +73,7 @@ local SuffixMultipliers = {
 }
 
 local function formatShortNumber(num)
+    if type(num) ~= "number" or num ~= num or num == math.huge then return "0" end
     if num >= 1e33 then return string.format("%.2fDc", num / 1e33) end
     if num >= 1e30 then return string.format("%.2fNo", num / 1e30) end
     if num >= 1e27 then return string.format("%.2fOc", num / 1e27) end
@@ -97,19 +92,26 @@ local function parseValueLine(line)
     local cleaned = tostring(line):lower():gsub("<[^>]+>", ""):gsub("[,%s]", "")
     local numStr, suffix = cleaned:match("([%d%.]+)([a-z]*)")
     local baseNum = tonumber(numStr)
-    if not baseNum then
+    if not baseNum or baseNum ~= baseNum or baseNum == math.huge then
         return 0
     end
 
+    local result = 0
     if suffix == "" or suffix == "s" or suffix == "sec" then
-        return baseNum
+        result = baseNum
+    elseif SuffixMultipliers[suffix] then
+        result = baseNum * SuffixMultipliers[suffix]
     end
-    return SuffixMultipliers[suffix] and (baseNum * SuffixMultipliers[suffix]) or 0
+
+    if result ~= result or result == math.huge then
+        return 0
+    end
+    return result
 end
 
 local function parseValue(rawInput)
     if type(rawInput) == "number" then
-        return rawInput
+        return (rawInput > 0 and rawInput < math.huge) and rawInput or 0
     end
     if type(rawInput) ~= "string" then
         return 0
@@ -126,18 +128,6 @@ local function parseValue(rawInput)
     return best
 end
 
-local function serializeCFrame(cf)
-    if not cf then return nil end
-    return { cf:GetComponents() }
-end
-
-local function deserializeCFrame(tbl)
-    if type(tbl) == "table" and #tbl == 12 then
-        return CFrame.new(unpackFn(tbl))
-    end
-    return nil
-end
-
 local function shortText(text, maxLen)
     if not text then return "-" end
     local flat = tostring(text):gsub("<[^>]+>", ""):gsub("%s+", " "):gsub("^%s*(.-)%s*$", "%1")
@@ -146,61 +136,6 @@ local function shortText(text, maxLen)
     end
     return flat
 end
-
--- ==========================================
--- SISTEM AUTO SAVE & LOAD CONFIG (JSON)
--- ==========================================
-local function saveConfig()
-    if not isLoaded or not writefile then return end
-
-    local dataToSave = {
-        AutoGrab = State.AutoGrab,
-        TargetValueRaw = State.TargetValueRaw,
-        AntiRagdoll = State.AntiRagdoll,
-        Zone1StandCFrame = serializeCFrame(State.Zone1StandCFrame)
-    }
-
-    pcall(function()
-        writefile(CONFIG_FILE, HttpService:JSONEncode(dataToSave))
-    end)
-end
-
-local function loadConfig()
-    if not (isfile and readfile) then
-        isLoaded = true
-        return false
-    end
-
-    local success, result = pcall(function()
-        if isfile(CONFIG_FILE) then
-            return HttpService:JSONDecode(readfile(CONFIG_FILE))
-        end
-        return nil
-    end)
-
-    if success and type(result) == "table" then
-        if type(result.AutoGrab) == "boolean" then State.AutoGrab = result.AutoGrab end
-        if type(result.TargetValueRaw) == "string" and result.TargetValueRaw ~= "" then
-            local parsed = parseValue(result.TargetValueRaw)
-            if parsed > 0 then
-                State.TargetValueRaw = result.TargetValueRaw
-                State.MinTargetNumber = parsed
-            end
-        end
-        if type(result.AntiRagdoll) == "boolean" then State.AntiRagdoll = result.AntiRagdoll end
-
-        local loadedZ1 = deserializeCFrame(result.Zone1StandCFrame)
-        if loadedZ1 then State.Zone1StandCFrame = loadedZ1 end
-
-        isLoaded = true
-        return true
-    end
-
-    isLoaded = true
-    return false
-end
-
-local configFound = loadConfig()
 
 -- ==========================================
 -- PEMBACAAN LANGSUNG ANIMALOVERHEAD -> CASHPERSECOND
@@ -303,7 +238,7 @@ local function readAnimalOverhead(container)
 end
 
 -- ==========================================
--- DETEKSI STATUS BAWAAN (CARRYCOUNT + SATCHELCONFIG + TOOL)
+-- DETEKSI STATUS BAWAAN (MAX 1 PET + SMART SWAP)
 -- ==========================================
 local Carry = {
     obj = nil,
@@ -320,26 +255,6 @@ local function getCarryCount()
         return count
     end
     return 0
-end
-
-local function getMaxCarryCapacity()
-    if SatchelConfig then
-        local cap = LocalPlayer:GetAttribute(SatchelConfig.CapacityAttribute)
-        if type(cap) == "number" then
-            return cap
-        end
-        if type(SatchelConfig.CapacityFor) == "function" then
-            local okCap, res = pcall(SatchelConfig.CapacityFor, SatchelConfig.DefaultTier)
-            if okCap and type(res) == "number" then
-                return res
-            end
-        end
-    end
-    return 1
-end
-
-local function isCarryFull()
-    return getCarryCount() >= getMaxCarryCapacity()
 end
 
 local function isPetTool(tool)
@@ -543,10 +458,10 @@ hookCharacterToolListener(Character)
 LocalPlayer.CharacterAdded:Connect(hookCharacterToolListener)
 
 -- ==========================================
--- AREA ZONE 1 & SAFEZONE (ZONEHITBOXES + ZONEBUILDS)
+-- AREA ZONE 1 & TITIK BERDIRI OTOMATIS (ZONE1.PARTS + SAFEZONE)
 -- ==========================================
-local ZONE_MARGIN = 45
-local ZONE_VERTICAL_MARGIN = 80
+local FLOOR_EDGE_MARGIN = 8
+local FLOOR_HEIGHT_MAX = 90
 
 local function getBoxFromInstance(inst)
     if not inst then return nil, nil end
@@ -584,14 +499,14 @@ end
 
 local function isInsideSafeZone(pos)
     local cf, size = getBoxFromInstance(getSafeZone())
-    return isPointInsideBox(cf, size, pos, 0, 10)
+    return isPointInsideBox(cf, size, pos, 0, 12)
 end
 
 local zoneInfoCache, zoneInfoTime = nil, 0
 local function getZone1Info()
     if zoneInfoCache and (tick() - zoneInfoTime) < 3 then
-        if (zoneInfoCache.hitbox and zoneInfoCache.hitbox.Parent)
-            or (zoneInfoCache.build and zoneInfoCache.build.Parent) then
+        if (zoneInfoCache.build and zoneInfoCache.build.Parent)
+            or (zoneInfoCache.hitbox and zoneInfoCache.hitbox.Parent) then
             return zoneInfoCache
         end
     end
@@ -620,6 +535,50 @@ local function getZone1Info()
         return nil
     end
 
+    -- Ambil seluruh BasePart lantai dari ZoneBuilds.Zone1.Parts yang berada di luar SafeZone
+    local floorParts = {}
+    if z1Build then
+        local partsContainer = z1Build:FindFirstChild("Parts") or z1Build
+        for _, desc in ipairs(partsContainer:GetDescendants()) do
+            if desc:IsA("BasePart") and not isInsideSafeZone(desc.Position) then
+                table.insert(floorParts, desc)
+            end
+        end
+    end
+
+    -- Hitung titik berdiri otomatis paling tengah di atas lantai Zone 1 (di luar SafeZone)
+    local autoStandCF = nil
+    if #floorParts > 0 then
+        local sumPos = Vector3.zero
+        for _, fp in ipairs(floorParts) do
+            sumPos = sumPos + fp.Position
+        end
+        local centroid = sumPos / #floorParts
+
+        local bestPart = nil
+        local bestScore = math.huge
+        for _, fp in ipairs(floorParts) do
+            local topPos = Vector3.new(fp.Position.X, fp.Position.Y + fp.Size.Y * 0.5 + 3.2, fp.Position.Z)
+            if not isInsideSafeZone(topPos) then
+                local distToCenter = (fp.Position - centroid).Magnitude
+                local areaBonus = math.min((fp.Size.X * fp.Size.Z) * 0.002, 20)
+                local score = distToCenter - areaBonus
+                if score < bestScore then
+                    bestScore = score
+                    bestPart = fp
+                end
+            end
+        end
+
+        if bestPart then
+            autoStandCF = CFrame.new(
+                bestPart.Position.X,
+                bestPart.Position.Y + bestPart.Size.Y * 0.5 + 3.2,
+                bestPart.Position.Z
+            )
+        end
+    end
+
     local hCF, hSize = getBoxFromInstance(z1Hitbox)
     local bCF, bSize = getBoxFromInstance(z1Build)
 
@@ -629,7 +588,9 @@ local function getZone1Info()
         hSize = hSize,
         build = z1Build,
         bCF = bCF,
-        bSize = bSize
+        bSize = bSize,
+        floorParts = floorParts,
+        standCF = autoStandCF
     }
 
     zoneInfoCache = info
@@ -643,19 +604,27 @@ local function isPositionInZone1(info, pos)
         return false
     end
 
-    if info.hCF and isPointInsideBox(info.hCF, info.hSize, pos, 12, ZONE_VERTICAL_MARGIN) then
-        return true
-    end
-
-    if info.bCF and isPointInsideBox(info.bCF, info.bSize, pos, ZONE_MARGIN, ZONE_VERTICAL_MARGIN) then
-        return true
-    end
-
-    if State.Zone1StandCFrame and not isInsideSafeZone(State.Zone1StandCFrame.Position) then
-        local dXZ = Vector3.new(pos.X - State.Zone1StandCFrame.Position.X, 0, pos.Z - State.Zone1StandCFrame.Position.Z).Magnitude
-        if dXZ <= 65 then
-            return true
+    -- 1. Prioritas utama: cek presisi terhadap lantai asli Zone1.Parts
+    if info.floorParts and #info.floorParts > 0 then
+        for _, fp in ipairs(info.floorParts) do
+            if fp and fp.Parent then
+                local rel = fp.CFrame:PointToObjectSpace(pos)
+                if math.abs(rel.X) <= (fp.Size.X * 0.5 + FLOOR_EDGE_MARGIN)
+                    and math.abs(rel.Z) <= (fp.Size.Z * 0.5 + FLOOR_EDGE_MARGIN)
+                    and rel.Y >= -15 and rel.Y <= FLOOR_HEIGHT_MAX then
+                    return true
+                end
+            end
         end
+    end
+
+    -- 2. Cadangan jika Zone1.Parts belum ter-stream: cek ZoneHitboxes.Zone1 atau ZoneBuilds.Zone1
+    if info.hCF and isPointInsideBox(info.hCF, info.hSize, pos, 8, FLOOR_HEIGHT_MAX) then
+        return true
+    end
+
+    if info.bCF and isPointInsideBox(info.bCF, info.bSize, pos, 20, FLOOR_HEIGHT_MAX) then
+        return true
     end
 
     return false
@@ -664,7 +633,7 @@ end
 local lastStreamRequest = 0
 local function keepZoneStreamed(info)
     if not workspace.StreamingEnabled or not info then return end
-    local cf = info.hCF or info.bCF
+    local cf = info.standCF or info.hCF or info.bCF
     if not cf then return end
     if (tick() - lastStreamRequest) < 5 then return end
     lastStreamRequest = tick()
@@ -801,7 +770,6 @@ local function scanZone1Pickups(aboveValue)
     local plotsFolder = workspace:FindFirstChild("Plots")
     local carriedFolder = workspace:FindFirstChild("CarriedAnimals")
 
-    -- Kumpulkan semua model di AnimalPickups beserta posisi dan nilainya
     local pickupEntries = {}
     for _, petModel in ipairs(pickupsFolder:GetChildren()) do
         local pos = getPickupPosition(petModel)
@@ -817,7 +785,7 @@ local function scanZone1Pickups(aboveValue)
     end
 
     local totalGlobalPickups = #pickupEntries
-    local carryFull = isCarryFull()
+    local carryFull = isPlayerCarrying() -- Maksimal kapasitas carry adalah 1 pet
     local totalZone1Pets = 0
     local highestSeenVal = 0
     local highestSeenName = "-"
@@ -841,7 +809,6 @@ local function scanZone1Pickups(aboveValue)
             if not isExcluded then
                 local promptCF = getPromptCFrame(prompt)
                 if promptCF and isPositionInZone1(zoneInfo, promptCF.Position) then
-                    -- Cocokkan dengan model di AnimalPickups (induk langsung atau jarak <= 25 stud)
                     local matchedEntry = nil
                     local closestPickupDist = 25
 
@@ -893,6 +860,7 @@ local function scanZone1Pickups(aboveValue)
                                 highestSeenSource = rawSource
                             end
 
+                            -- Smart Swap: harus memenuhi MinTargetNumber DAN lebih besar dari pet yang sedang dibawa
                             if val >= State.MinTargetNumber and val > (aboveValue or 0) then
                                 local dist = RootPart and (RootPart.Position - promptCF.Position).Magnitude or 0
                                 if val > bestValue or (val == bestValue and dist < bestDistance) then
@@ -916,14 +884,14 @@ local function scanZone1Pickups(aboveValue)
     end
 
     if totalZone1Pets == 0 and totalGlobalPickups > 0 and skipReason == "-" then
-        skipReason = pickupEntries[1].model.Name .. " (di luar Zone 1 / prompt belum aktif)"
+        skipReason = pickupEntries[1].model.Name .. " (di luar lantai Zone 1)"
     end
 
     return bestMatch, totalZone1Pets, highestSeenVal, highestSeenName, highestSeenSource, true, candidateList, totalGlobalPickups, skipReason
 end
 
 -- ==========================================
--- EKSEKUSI TELEPORT, STEALPROMPT & SETOR KE SAFEZONE
+-- EKSEKUSI TELEPORT, STEALPROMPT & SMART SWAP SAFEZONE
 -- ==========================================
 local RELEASE_WAIT = 3.0
 local SWAP_RETRY_DELAY = 4
@@ -944,14 +912,14 @@ local function instantCFrame(targetCF)
     RootPart.CFrame = targetCF
 end
 
-local function resolveSafeReturnCFrame(fallbackCF)
-    if State.Zone1StandCFrame and not isInsideSafeZone(State.Zone1StandCFrame.Position) then
-        return State.Zone1StandCFrame
+local function resolveZone1ReturnCFrame(fallbackCF)
+    local z1 = getZone1Info()
+    if z1 and z1.standCF and not isInsideSafeZone(z1.standCF.Position) then
+        return z1.standCF
     end
     if fallbackCF and not isInsideSafeZone(fallbackCF.Position) then
         return fallbackCF
     end
-    local z1 = getZone1Info()
     local cf = z1 and (z1.hCF or z1.bCF)
     if cf then
         return CFrame.new(cf.Position + Vector3.new(0, 4, 0))
@@ -1070,8 +1038,9 @@ local function depositToSafeZone(returnCF)
 end
 
 local function carryPet(match)
-    local returnCF = resolveSafeReturnCFrame(RootPart.CFrame)
+    local returnCF = resolveZone1ReturnCFrame(RootPart.CFrame)
 
+    -- Smart Swap: jika sudah membawa 1 pet (value lebih rendah), setor dulu ke SafeZone
     if isPlayerCarrying() then
         if not depositToSafeZone(returnCF) then
             Carry.cooldownUntil = tick() + SWAP_RETRY_DELAY
@@ -1095,6 +1064,7 @@ local function carryPet(match)
         end
     end)
 
+    -- Kembali berdiri otomatis di titik tengah lantai Zone 1
     instantCFrame(returnCF)
 
     if success then
@@ -1281,9 +1251,9 @@ end)
 -- PEMBUATAN MENU RAYFIELD UI
 -- ==========================================
 local Window = Rayfield:CreateWindow({
-    Name = "Break & Steal an Egg | Zone 1 Hub",
+    Name = "LurKala Hub",
     LoadingTitle = "Memuat Script...",
-    LoadingSubtitle = "AnimalPickups + SafeZone Swap",
+    LoadingSubtitle = "Auto Steal Pet",
     ConfigurationSaving = {
         Enabled = false
     }
@@ -1292,75 +1262,62 @@ local Window = Rayfield:CreateWindow({
 local MainTab = Window:CreateTab("Auto Carry", 4483362458)
 
 local StatusParagraph = MainTab:CreateParagraph({
-    Title = "Status Auto Carry (Zone 1)",
-    Content = "Memindai AnimalPickups di Zone 1..."
+    Title = "Status Auto Carry",
+    Content = "Memindai Zone 1"
 })
 
 MainTab:CreateToggle({
-    Name = "Aktifkan Auto Carry Zone 1 (Auto Swap SafeZone)",
+    Name = "Aktifkan Auto Steal",
     CurrentValue = State.AutoGrab,
     Flag = "ToggleAutoGrab",
     Callback = function(Value)
         State.AutoGrab = Value
-        saveConfig()
-        if Value and RootPart then
-            if not isInsideSafeZone(RootPart.Position) then
-                State.Zone1StandCFrame = RootPart.CFrame
-                saveConfig()
-            end
-            Rayfield:Notify({
-                Title = "Auto Carry Aktif",
-                Content = "Menunggu pet >= " .. State.TargetValueRaw .. " di Zone 1.",
-                Duration = 3
-            })
+        if Value then
+            task.delay(0.05, function()
+                pcall(function()
+                    Rayfield:Notify({
+                        Title = "Auto Steal Aktif",
+                        Content = "Menunggu pet >= " .. State.TargetValueRaw .. " di Zone 1.",
+                        Duration = 2.5
+                    })
+                end)
+            end)
         end
     end
 })
 
-local InputTargetVal = MainTab:CreateInput({
-    Name = "Target Minimal Value (Tekan Enter setelah ketik)",
+MainTab:CreateInput({
+    Name = "Target Minimal Value",
     PlaceholderText = "Saat ini: " .. State.TargetValueRaw,
     RemoveTextAfterFocusLost = false,
     Callback = function(Text)
-        local parsed = parseValue(Text)
-        if parsed > 0 then
-            State.TargetValueRaw = Text
-            State.MinTargetNumber = parsed
-            saveConfig()
-            Rayfield:Notify({
-                Title = "Value Tersimpan",
-                Content = "Target aktif sekarang: " .. Text .. " (" .. formatShortNumber(parsed) .. ")",
-                Duration = 3
-            })
-        else
-            Rayfield:Notify({
-                Title = "Format Tidak Valid",
-                Content = "Gunakan angka atau suffix (contoh: 10B, 100T, 1Qa).",
-                Duration = 3
-            })
-        end
-    end
-})
+        if type(Text) ~= "string" then return end
+        local trimmed = Text:gsub("^%s*(.-)%s*$", "%1")
+        if trimmed == "" then return end
 
-MainTab:CreateButton({
-    Name = "Kunci Titik Diam Zone 1 (Posisi Sekarang)",
-    Callback = function()
-        if RootPart then
-            if isInsideSafeZone(RootPart.Position) then
-                Rayfield:Notify({
-                    Title = "Berada di SafeZone!",
-                    Content = "Keluar dari garis merah SafeZone ke area Zone 1 dulu sebelum mengunci titik diam.",
-                    Duration = 4
-                })
-                return
-            end
-            State.Zone1StandCFrame = RootPart.CFrame
-            saveConfig()
-            Rayfield:Notify({
-                Title = "Titik Zone 1 Tersimpan",
-                Content = "Karakter akan diam di titik Zone 1 ini setelah mengambil/menukar pet.",
-                Duration = 3
-            })
+        local parsed = parseValue(trimmed)
+        if parsed > 0 and parsed < math.huge then
+            State.TargetValueRaw = trimmed
+            State.MinTargetNumber = parsed
+            task.delay(0.05, function()
+                pcall(function()
+                    Rayfield:Notify({
+                        Title = "Value Tersimpan",
+                        Content = "Target aktif: " .. trimmed .. " (" .. formatShortNumber(parsed) .. ")",
+                        Duration = 2.5
+                    })
+                end)
+            end)
+        else
+            task.delay(0.05, function()
+                pcall(function()
+                    Rayfield:Notify({
+                        Title = "Format Tidak Valid",
+                        Content = "Gunakan angka atau suffix (contoh: 10B, 100T, 1Qa).",
+                        Duration = 2.5
+                    })
+                end)
+            end)
         end
     end
 })
@@ -1371,19 +1328,19 @@ MainTab:CreateToggle({
     Flag = "ToggleAntiRagdoll",
     Callback = function(Value)
         State.AntiRagdoll = Value
-        saveConfig()
     end
 })
 
 -- ==========================================
--- LOOP UTAMA: PINDAI ANIMALPICKUPS ZONE 1 & AUTO SWAP SAFEZONE
+-- LOOP UTAMA: PINDAI ANIMALPICKUPS ZONE 1 & SMART SWAP SAFEZONE
 -- ==========================================
 task.spawn(function()
     while task.wait(0.3) do
         if RootPart and RootPart.Parent then
             local carrying = syncCarriedState()
+            local zoneInfo = getZone1Info()
 
-            keepZoneStreamed(getZone1Info())
+            keepZoneStreamed(zoneInfo)
             local match, totalPets, highestVal, highestName, highestSource, zoneFound, candidateList, globalCount, skipReason =
                 scanZone1Pickups(carrying and Carry.value or 0)
 
@@ -1393,9 +1350,10 @@ task.spawn(function()
                     or (globalCount > 0 and ("Filter: " .. shortText(skipReason, 45)) or "-")
 
                 local carryText = carrying
-                    and string.format("%s ($%s/s) [%d/%d]", tostring(Carry.name), formatShortNumber(Carry.value), getCarryCount(), getMaxCarryCapacity())
-                    or string.format("Kosong [0/%d]", getMaxCarryCapacity())
+                    and string.format("%s ($%s/s) [1/1]", tostring(Carry.name), formatShortNumber(Carry.value))
+                    or "Kosong [0/1]"
 
+                local floorCount = (zoneInfo and zoneInfo.floorParts) and #zoneInfo.floorParts or 0
                 local zoneText = zoneFound
                     and string.format(
                         "Zone 1: %d (Map: %d) | Tertinggi: %s ($%s/s)",
@@ -1409,12 +1367,13 @@ task.spawn(function()
                 StatusParagraph:Set({
                     Title = "Status Auto Carry (Zone 1)",
                     Content = string.format(
-                        "Dibawa: %s\nTarget Aktif: %s (%s)\n%s\nCashPerSecond: %s | SafeZone: %s\nKandidat: %s",
+                        "Dibawa: %s\nTarget Aktif: %s (%s)\n%s\nCashPerSecond: %s | Lantai Z1: %d | SafeZone: %s\nKandidat: %s",
                         carryText,
                         State.TargetValueRaw,
                         formatShortNumber(State.MinTargetNumber),
                         zoneText,
-                        shortText(highestSource, 40),
+                        shortText(highestSource, 32),
+                        floorCount,
                         getSafeZone() and "OK" or "TIDAK ADA",
                         shortText(candText, 85)
                     )
@@ -1426,11 +1385,13 @@ task.spawn(function()
             if State.AutoGrab and not isBusy and match and not swapBlocked then
                 isBusy = true
 
-                Rayfield:Notify({
-                    Title = carrying and "Pet Lebih Bernilai Ditemukan!" or "Pet Target Ditemukan!",
-                    Content = string.format("%s ($%s/s)", tostring(match.name), formatShortNumber(match.value)),
-                    Duration = 2.5
-                })
+                pcall(function()
+                    Rayfield:Notify({
+                        Title = carrying and "Pet Lebih Bernilai Ditemukan!" or "Pet Target Ditemukan!",
+                        Content = string.format("%s ($%s/s)", tostring(match.name), formatShortNumber(match.value)),
+                        Duration = 2.5
+                    })
+                end)
 
                 local okRun, result = pcall(carryPet, match)
                 if okRun and result then
@@ -1445,12 +1406,3 @@ task.spawn(function()
         end
     end
 end)
-
-if configFound then
-    pcall(function() InputTargetVal:Set(State.TargetValueRaw) end)
-    Rayfield:Notify({
-        Title = "Config Dimuat",
-        Content = "Target Minimal Value: " .. State.TargetValueRaw,
-        Duration = 3
-    })
-end
